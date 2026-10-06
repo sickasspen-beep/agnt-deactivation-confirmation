@@ -54,4 +54,4 @@ The existing dependency lockfile required `npm ci --legacy-peer-deps --ignore-sc
 
 ## Sharing
 
-This repository is private because the patch contains code from a private project. Invite the intended reviewer as a collaborator, then share this repository link. Access to the original repository is needed to apply and deploy the change.
+This repository is public. Share https://github.com/sickasspen-beep/agnt-deactivation-confirmation directly; no invitation is required to view the patch, preview, or instructions. Access to the original private repository is still needed to apply and deploy the change.
