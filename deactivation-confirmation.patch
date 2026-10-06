@@ -1,0 +1,216 @@
+diff --git a/mint/components/PieceStage.tsx b/mint/components/PieceStage.tsx
+--- a/mint/components/PieceStage.tsx
++++ b/mint/components/PieceStage.tsx
+@@ -92,8 +92,29 @@
+  const [name,setName]=useState(piece.soul.name);
+  const [archetype,setArchetype]=useState(piece.soul.archetype||ARCHETYPES[0][0]);
+  const [voice,setVoice]=useState(piece.soul.voice||VOICES[0][0]);
++ const deactivationDialog=useRef<HTMLDialogElement>(null);
++ const deactivationSubmitted=useRef(false);
++ const [deactivationFor,setDeactivationFor]=useState<string|null>(null);
++ const [deactivationText,setDeactivationText]=useState('');
++ const confirmingDeactivation=piece.live&&deactivationFor===piece.id;
++
++ const cancelDeactivation=()=>{
++  deactivationDialog.current?.close();
++  setDeactivationFor(null);
++  setDeactivationText('');
++ };
+ 
+  useEffect(()=>{dialog.current?.showModal();},[]);
++ useEffect(()=>{
++  setDeactivationFor(null);
++  setDeactivationText('');
++ },[piece.id,piece.live]);
++ useEffect(()=>{
++  if(!confirmingDeactivation)return;
++  const confirmation=deactivationDialog.current;
++  confirmation?.showModal();
++  return ()=>confirmation?.close();
++ },[confirmingDeactivation]);
+  // A piece that changes underneath the stage - claimed, sold, re-read - must not leave the
+  // editor showing what the chain no longer says.
+  useEffect(()=>{
+@@ -194,7 +215,12 @@
+                onClick={()=>onSaveSoul(name.trim(),archetype,voice)}>Save its soul</button>
+        {walletDeployed===false&&<button className="stageGhost" disabled={busy} onClick={onDeployAccount}>Deploy its wallet</button>}
+        {identity!==undefined&&identity!=='error'&&identity!=='pending'&&!identity.agentId&&<button className="stageGhost" disabled={busy} onClick={onRegisterIdentity}>Give it an identity</button>}
+-       <button className="stageGhost" disabled={busy} onClick={onDeactivate}>Deactivate</button>
++       <button className="stageGhost" disabled={busy} onClick={()=>{
++        if(busy)return;
++        deactivationSubmitted.current=false;
++        setDeactivationText('');
++        setDeactivationFor(piece.id);
++       }}>Deactivate</button>
+       </div>
+       <p className="stageFine">Writing the soul costs gas only — no {symbol}, no fee. Deactivating collects first and returns nothing: the activation fee was spent when you paid it.</p>
+       <p className="stageFine">Its identity registers this piece as an on-chain agent (ERC-8004). Gas only, once per piece, and it stays with the piece if it&rsquo;s sold.</p>
+@@ -221,5 +247,33 @@
+ 
+   {!!status&&<p className="stageFine" role="status">{status}</p>}
+   {!!issue&&<p className="stageIssue" role="alert">{issue}</p>}
++  {confirmingDeactivation&&<dialog ref={deactivationDialog} className="pieceStage"
++    aria-label={`Deactivate AGNT #${piece.id}?`} aria-describedby={`deactivation-warning-${piece.id}`}
++    onCancel={e=>{e.preventDefault();e.stopPropagation();cancelDeactivation();}}>
++   <div className="stageHead">
++    <p className="stageId">Deactivate AGNT #{piece.id}?</p>
++    <button type="button" className="drawerClose" aria-label="Cancel deactivation" onClick={cancelDeactivation}>×</button>
++   </div>
++   <p className="stageFine" id={`deactivation-warning-${piece.id}`}>
++    This piece will stop earning. Any accrued rewards are collected first. The activation fee is not refunded.
++   </p>
++   <div className="soulFields">
++    <div>
++     <label className="fieldLabel" htmlFor={`deactivation-${piece.id}`}>Type deactivate to confirm</label>
++     <input className="soulInput" id={`deactivation-${piece.id}`} type="text" value={deactivationText}
++       onChange={e=>setDeactivationText(e.target.value)} disabled={busy}
++       autoComplete="off" autoCapitalize="none" spellCheck={false} autoFocus/>
++    </div>
++   </div>
++   <div className="stageActions">
++    <button type="button" className="stageGhost" onClick={cancelDeactivation}>Cancel</button>
++    <button type="button" className="stagePrimary" disabled={busy||deactivationText!=='deactivate'} onClick={()=>{
++     if(busy||!confirmingDeactivation||deactivationText!=='deactivate'||deactivationSubmitted.current)return;
++     deactivationSubmitted.current=true;
++     cancelDeactivation();
++     onDeactivate();
++    }}>Confirm deactivation</button>
++   </div>
++  </dialog>}
+  </dialog>;
+ }
+diff --git a/mint/tests/deactivation-confirmation.test.mjs b/mint/tests/deactivation-confirmation.test.mjs
+new file mode 100644
+--- /dev/null
++++ b/mint/tests/deactivation-confirmation.test.mjs
+@@ -0,0 +1,130 @@
++import test from 'node:test';
++import assert from 'node:assert/strict';
++import {readFileSync} from 'node:fs';
++import {createRequire} from 'node:module';
++import vm from 'node:vm';
++const ts=createRequire(import.meta.url)('typescript');
++
++function nodes(tree){
++ if(Array.isArray(tree))return tree.flatMap(nodes);
++ if(!tree||typeof tree!=='object')return [];
++ return [tree,...nodes(tree.props?.children)];
++}
++function text(tree){
++ if(Array.isArray(tree))return tree.map(text).join('');
++ if(tree==null||typeof tree==='boolean')return '';
++ return typeof tree==='object'?text(tree.props?.children):String(tree);
++}
++const event=()=>({preventDefault(){},stopPropagation(){}});
++
++function harness(){
++ let index=0,dirty=false,tree;
++ const slots=[],effects=[],cleanups=[];
++ const calls=[];
++ const props={
++  piece:{id:'42',tier:0,live:true,accrued:0n,share:1n,account:'0x1234567890',soul:{name:'Agent',archetype:'quant',voice:'chill'}},
++  symbol:'AGNT',tokenCost:1n,ethFee:0n,shareOf:1n,poolShares:1n,burnBps:5000,
++  busy:false,status:'',issue:'',paused:false,
++  onClose(){},onActivate(){},onClaim(){},onSaveSoul(){},onDeployAccount(){},onRegisterIdentity(){},
++  onDeactivate:()=>calls.push(props.piece.id),
++ };
++ const react={
++  useRef:value=>slots[index++]??={current:value},
++  useState:value=>{
++   const i=index++;if(!(i in slots))slots[i]=typeof value==='function'?value():value;
++   return [slots[i],value=>{const next=typeof value==='function'?value(slots[i]):value;if(!Object.is(next,slots[i])){slots[i]=next;dirty=true;}}];
++  },
++  useEffect:(fn,deps)=>{
++   const i=index++;
++   if(!slots[i]||!deps||deps.some((value,n)=>!Object.is(value,slots[i][n]))){
++    slots[i]=deps;effects.push(()=>{cleanups[i]?.();cleanups[i]=fn();});
++   }
++  },
++ };
++ const jsx=(type,props)=>({type,props});
++ const ctx={exports:{},TextEncoder,console,require:name=>{
++  if(name==='react')return react;
++  if(name==='react/jsx-runtime')return {jsx,jsxs:jsx};
++  if(name==='@/lib/chain/vendor/ethers-6.16.0.min.js')return {formatEther:value=>String(Number(value)/1e18)};
++  if(name==='@/lib/chain/activation.js')return {MAX_NAME_BYTES:64,nameFits:value=>new TextEncoder().encode(value).length<=64};
++  assert.fail(name);
++ }};
++ vm.createContext(ctx);
++ vm.runInContext(ts.transpileModule(readFileSync(new URL('../components/PieceStage.tsx',import.meta.url),'utf8'),{
++  compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022,jsx:ts.JsxEmit.ReactJSX},
++ }).outputText,ctx);
++ function render(){
++  for(let pass=0;pass<20;pass++){
++   index=0;dirty=false;tree=ctx.exports.default(props);
++   for(const node of nodes(tree))if(node.props?.ref&&typeof node.props.ref==='object'){
++    node.props.ref.current??={open:false,showModal(){this.open=true;},close(){this.open=false;},focus(){}};
++   }
++   while(effects.length)effects.shift()();
++   if(!dirty)return tree;
++  }
++  assert.fail('PieceStage did not settle');
++ }
++ function name(node){
++  if(node.props['aria-label'])return node.props['aria-label'];
++  if(node.props['aria-labelledby'])return node.props['aria-labelledby'].split(' ').map(id=>text(nodes(tree).find(n=>n.props?.id===id))).join(' ');
++  return text(node);
++ }
++ function button(label){
++  const node=nodes(tree).find(node=>node.type==='button'&&name(node)===label);
++  assert.ok(node,`button "${label}" is rendered`);return node;
++ }
++ function confirmation(){
++  return nodes(tree).find(node=>node.type==='dialog'&&name(node)===`Deactivate AGNT #${props.piece.id}?`&&(node.props.open||node.props.ref?.current?.open));
++ }
++ function input(){
++  const dialog=confirmation();assert.ok(dialog,'deactivation confirmation is open');
++  const label=nodes(dialog).find(node=>node.type==='label'&&text(node)==='Type deactivate to confirm');
++  assert.ok(label,'confirmation input has its visible label');
++  const node=nodes(dialog).find(node=>node.type==='input'&&node.props.id===label.props.htmlFor);
++  assert.ok(node,'label is associated with the confirmation input');return node;
++ }
++ function open(){button('Deactivate').props.onClick(event());render();assert.ok(confirmation(),'Deactivate opens its confirmation');}
++ function type(value){input().props.onChange({target:{value}});render();}
++ render();return {props,calls,render,button,confirmation,input,open,type};
++}
++
++test('opening deactivation requires a separate, exactly typed confirmation and sends only once',()=>{
++ const h=harness();assert.equal(h.confirmation(),undefined);
++ h.open();assert.equal(h.calls.length,0);
++ for(const value of ['', 'deactivat', 'DEACTIVATE', 'Deactivate', ' deactivate', 'deactivate ']){
++  h.type(value);
++  const confirm=h.button('Confirm deactivation');assert.equal(confirm.props.disabled,true,JSON.stringify(value));
++  confirm.props.onClick(event());assert.equal(h.calls.length,0);
++ }
++ h.type('deactivate');const confirm=h.button('Confirm deactivation');
++ assert.equal(Boolean(confirm.props.disabled),false);
++ confirm.props.onClick(event());confirm.props.onClick(event());
++ assert.deepEqual(h.calls,['42']);
++});
++
++test('busy state blocks opening and submitting a deactivation',()=>{
++ const h=harness();h.props.busy=true;h.render();assert.equal(h.button('Deactivate').props.disabled,true);
++ h.props.busy=false;h.render();h.open();h.type('deactivate');
++ h.props.busy=true;h.render();
++ if(h.confirmation()){
++  const confirm=h.button('Confirm deactivation');assert.equal(confirm.props.disabled,true);
++  confirm.props.onClick(event());
++ }
++ assert.equal(h.calls.length,0);
++});
++
++for(const cancel of ['Cancel','Cancel deactivation','Escape'])test(`${cancel} closes without deactivating and clears the next confirmation`,()=>{
++ const h=harness();h.open();h.type('deactivate');
++ if(cancel==='Escape')h.confirmation().props.onCancel(event());
++ else h.button(cancel).props.onClick(event());
++ h.render();assert.equal(h.confirmation(),undefined);assert.equal(h.calls.length,0);
++ h.open();assert.equal(h.input().props.value,'');assert.equal(h.button('Confirm deactivation').props.disabled,true);
++});
++
++for(const change of ['id','live'])test(`changing the piece ${change} clears its deactivation approval`,()=>{
++ const h=harness();h.open();h.type('deactivate');
++ h.props.piece={...h.props.piece,...(change==='id'?{id:'43'}:{live:false})};h.render();
++ assert.equal(h.confirmation(),undefined);assert.equal(h.calls.length,0);
++ if(change==='live'){h.props.piece={...h.props.piece,live:true};h.render();}
++ h.open();assert.equal(h.input().props.value,'');assert.equal(h.button('Confirm deactivation').props.disabled,true);
++});
